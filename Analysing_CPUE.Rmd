@@ -1,0 +1,80 @@
+---
+title: "Analysising CPUE"
+author: "Georgina Shaw"
+date: "27/10/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Comparing the median CPUE to the mean CPUE, incuding a time series
+
+Firstly load all the packages needed
+```{r, eval=FALSE}
+library(readr)
+library(dplyr)
+library(lubridate)
+library(magrittr)
+library(tidyverse)
+library(ggplot2)
+```
+
+Next read in the data 
+```{r, eval=FALSE}
+landings_data <- read_csv("sample_landings_data_raw.txt")
+```
+
+Renaming the columns and turning the date column into a date format that R recognises
+```{r, eval=FALSE}
+landings_data <- landings_data %>%
+  rename(Year = yy,
+         Date = dat,
+         Trip_ID = trip,
+         Effort_Hours = effort,
+         Gear = gr,
+         Species = sp,
+         Length_cm = l_cm,
+         Weight_g = w_cm) %>%
+   mutate(Date = mdy(Date)) 
+```  
+
+
+
+I cleaned the data and removed any values with NA so it would be easier to calculate mean and medians 
+```{r, eval=FALSE}
+landings_data[!complete.cases(landings_data),]
+landings_data <- na.omit(landings_data)
+```
+
+Computing the CPUE 
+```{r, message = FALSE, eval=FALSE}
+cpue_data <- landings_data %>% 
+    mutate(Weight_kg = Weight_g / 1000) %>%
+    group_by(Year,Trip_ID) %>% 
+    summarize(Trip_CPUE = sum(Weight_kg) /           mean(Effort_Hours)) %>% 
+    group_by(Year) %>% 
+    summarize(Median_CPUE_kg_hour =                  median(Trip_CPUE), Mean_CPUE_kg_hour =           mean(Trip_CPUE), Trip_CPUE = Trip_CPUE) 
+```
+```{r, message=FALSE, eval=TRUE}
+cpue_data
+```
+
+Computing a graph comparing median CPUE to the mean CPUE with indication of the year they are from
+```{r, eval=TRUE, message=TRUE}
+  ggplot(data = cpue_data, mapping =  aes(x=Median_CPUE_kg_hour,y=Mean_CPUE_kg_hour)) +
+  geom_point(mapping = aes(x = Median_CPUE_kg_hour, y = Mean_CPUE_kg_hour, color = Year)) +
+  geom_line() + 
+  ylab("Mean CPUE [kg/hour]") + xlab("MEdian CPUE [kg/houe]") +
+  ggtitle("Comparing Median CPUE against Mean CPUE") 
+```
+
+Boxplot of CPUE
+```{r}
+boxplot(cpue_data$Trip_CPUE)
+```
+
+
+
+
