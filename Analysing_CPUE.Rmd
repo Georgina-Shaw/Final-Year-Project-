@@ -2,17 +2,19 @@
 title: "Analysising CPUE"
 author: "Georgina Shaw"
 date: "27/10/2021"
-output: pdf_document
+output: github_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```
 
+
+
 ## Comparing the median CPUE to the mean CPUE, incuding a time series
 
 Firstly load all the packages needed
-```{r, eval=FALSE}
+```{r, eval=TRUE}
 library(readr)
 library(dplyr)
 library(lubridate)
@@ -22,12 +24,12 @@ library(ggplot2)
 ```
 
 Next read in the data 
-```{r, eval=FALSE}
+```{r, eval=TRUE}
 landings_data <- read_csv("sample_landings_data_raw.txt")
 ```
 
 Renaming the columns and turning the date column into a date format that R recognises
-```{r, eval=FALSE}
+```{r, eval=TRUE}
 landings_data <- landings_data %>%
   rename(Year = yy,
          Date = dat,
@@ -43,13 +45,13 @@ landings_data <- landings_data %>%
 
 
 I cleaned the data and removed any values with NA so it would be easier to calculate mean and medians 
-```{r, eval=FALSE}
+```{r, eval=TRUE}
 landings_data[!complete.cases(landings_data),]
 landings_data <- na.omit(landings_data)
 ```
 
 Computing the CPUE 
-```{r, message = FALSE, eval=FALSE}
+```{r, message=FALSE, eval=TRUE}
 cpue_data <- landings_data %>% 
     mutate(Weight_kg = Weight_g / 1000) %>%
     group_by(Year,Trip_ID) %>% 
@@ -57,7 +59,7 @@ cpue_data <- landings_data %>%
     group_by(Year) %>% 
     summarize(Median_CPUE_kg_hour =                  median(Trip_CPUE), Mean_CPUE_kg_hour =           mean(Trip_CPUE), Trip_CPUE = Trip_CPUE) 
 ```
-```{r, message=FALSE, eval=TRUE}
+```{r}
 cpue_data
 ```
 
@@ -74,7 +76,3 @@ Boxplot of CPUE
 ```{r}
 boxplot(cpue_data$Trip_CPUE)
 ```
-
-
-
-
