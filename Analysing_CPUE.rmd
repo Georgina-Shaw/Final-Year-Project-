@@ -21,7 +21,7 @@ library(ggplot2)
 Next read in the data
 
 ```{r message=FALSE}
-landings_data <- read_csv("data/sample_landings_data_raw.csv")
+landings_data <- read_csv("sample_landings_data_raw.txt")
 ```
 
 Renaming the columns and turning the date column into a date format that
