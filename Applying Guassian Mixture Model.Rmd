@@ -1,0 +1,1001 @@
+---
+title: "Applying Gaussian Mixture Model"
+author: "Georgina Shaw"
+date: "07/03/2022"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+load("data/stomach_dataset.Rdata")
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(ggplot2)
+```
+
+# Herrin 
+
+
+Only keeping the information we need 
+```{r}
+df <- stom_df %>%
+  transmute(Species = pred_species,
+            wprey = prey_weight_g,
+            wpredator = pred_weight_g,
+            Nprey = prey_count / n_stomachs,
+            l = log(wpredator / wprey))
+```
+Choosing the type of fish to use, this time looking at cod 
+```{r}
+stomach <- df %>%
+  filter(Species == "Clupea harengus",
+         wprey > 0)
+
+stomach %>% 
+  group_by(Species) %>% 
+  summarise(wprey_min = min(wprey),
+            wprey_max = max(wprey),
+            lmin = min(l),
+            lmax = max(l))
+
+stomach %>% 
+  group_by(Species) %>% 
+  filter(wprey == max(wprey))
+```
+Creating bins for the data 
+```{r}
+no_bins <- 30  # Number of bins
+binsize <- (max(stomach$l) - min(stomach$l)) / (no_bins - 1)
+breaks <- seq(min(stomach$l) - binsize/2,
+              by = binsize, length.out = no_bins + 1)
+```
+Splitting the data into the bins that have been made
+```{r}
+binned_stomach <- stomach %>% 
+  # bin data
+  mutate(cut = cut(l, breaks = breaks, right = FALSE,
+                   labels = FALSE)) %>% 
+  group_by(Species, cut) %>% 
+  summarise(Numbers = sum(Nprey), 
+            Biomass = sum(Nprey * wprey)) %>% 
+  # normalise
+  mutate(Numbers = Numbers / sum(Numbers) / binsize,
+         Biomass = Biomass / sum(Biomass) / binsize)  %>%
+  # column for predator/prey size ratio
+  mutate(l = map_dbl(cut, function(idx) breaks[idx] + binsize/2))
+binned_stomach
+```
+We convert this into the long table format preferred by ggplot2.
+```{r}
+binned_stomach <- binned_stomach %>%
+  gather(key = "Type", value = "Density", Numbers, Biomass)
+```
+       
+## Histograms 
+Plot the histogram that represents estimates of the normalised number density and the normalised biomass density 
+```{r}
+binned_stomach %>% 
+  ggplot(aes(l, Density, fill = Type)) +
+  geom_col(position = "dodge") +
+  facet_grid(rows = vars(Species), scales = "free_y") +
+  xlab("Log of Predator/Prey mass ratio") +
+  expand_limits(x = c(0, 30))
+```
+          
+## Kernal Density Estimation 
+```{r}
+adjust <- 1/2  # decrease bandwidth for kernel estimate
+stomach <- stomach %>% 
+  group_by(Species) %>% 
+  mutate(weight_numbers = Nprey / sum(Nprey),
+         weight_biomass = Nprey * wprey / sum(Nprey * wprey))
+ggplot(stomach) +
+  geom_density(aes(l, weight = weight_numbers,
+                   fill = "Numbers"),
+               adjust = adjust) +
+  geom_density(aes(l, weight = weight_biomass,
+                   fill = "Biomass"),
+               adjust = adjust) +
+  facet_grid(rows = vars(Species), scales = "free_y") +
+  xlab("Log of predator/prey mass ratio") +
+  expand_limits(x = c(0, 29))
+```
+         
+## Gaussian Distribution fit
+Plotting the normal distribution for numbers 
+```{r}
+weighted.sd <- function(x, w) {
+  sqrt(sum(w * (x - weighted.mean(x, w))^2))
+}
+fit <- stomach %>% 
+  summarise(mean = weighted.mean(l, weight_numbers),
+            sd = weighted.sd(l, weight_numbers))
+stomach %>% 
+  ggplot() +
+  geom_density(aes(l, weight = weight_numbers),
+               fill = "#00BFC4", adjust = adjust) +
+  xlab("Log of Predator/Prey mass ratio") +
+  stat_function(fun = dnorm, 
+                args = list(mean = fit$mean, 
+                            sd = fit$sd), 
+                colour = "blue") +
+  expand_limits(x = c(6, 30))
+```
+         
+Now adding biomass
+```{r}
+stomach %>% 
+  ggplot() +
+  geom_density(aes(l, weight = weight_numbers,
+                   fill = "Numbers"),
+               adjust = adjust) +
+  geom_density(aes(l, weight = weight_biomass,
+                   fill = "Biomass"),
+               adjust = adjust) +
+  xlab("Log of Predator/Prey mass ratio") +
+  stat_function(fun = dnorm, 
+                args = list(mean = fit$mean, 
+                            sd = fit$sd), 
+                colour = "blue") +
+  stat_function(fun = dnorm, 
+                args = list(mean = fit$mean - fit$sd^2, 
+                            sd = fit$sd), 
+                colour = "red") +
+  expand_limits(x = c(0, 30))
+```
+
+```{r}
+weighted.sd <- function(x, w) {
+  sqrt(sum(w * (x - weighted.mean(x, w))^2))
+}
+fit <- stomach %>% 
+  summarise(mean = weighted.mean(l, weight_numbers),
+            sd = weighted.sd(l, weight_numbers))
+stomach %>% 
+  ggplot() +
+  geom_density(aes(l, weight = weight_numbers,
+                   fill = "Numbers"),
+               adjust = adjust) +
+  geom_density(aes(l, weight = weight_biomass,
+                   fill = "Biomass"),
+               adjust = adjust) +
+  xlab("Log of Predator/Prey mass ratio") +
+  stat_function(fun = dnorm, 
+                args = list(mean = fit$mean, 
+                            sd = fit$sd), 
+                colour = "blue") +
+  stat_function(fun = dnorm, 
+                args = list(mean = fit$mean - fit$sd^2, 
+                            sd = fit$sd), 
+                colour = "red") +
+  expand_limits(x = c(0, 30))
+```
+
+## Gaussaian Mixture Model 
+The Gaussian Mixture model is the plotting of multiple Gaussian distributions on one plot. The estimates of the parameters are found using expectation maximization (EM), which consists of two steps, the expectation step (E step) and the maximization step (M step). 
+
+For this analysis only the the univariant case needs to be considered, with parameters $\mu_{k}$ and $\sigma_{k}$ for each k-th component, with $k=2$. The mixture component weightings are defined as $\phi_{k}$ with $\sum_{i=1}^K \phi_{i} = 1$, so the probabilities add to one. 
+
+The E step involves calculating the expectation of of the the assignment of each class for each data point given the model parameters $\phi_{k}$, $\mu_{k}$ and $\sigma_{k}$. The M step involves maximization the expectations calculated in the E step, which updates the values $\phi_{k}$, $\mu_{k}$ and $\sigma_{k}$. Eventually this should converge, giving a maximum likelihood estimate of the parameters. 
+
+
+If the Gaussian Mixture Model fitted the numbers density then is would be distributed by two Gaussians models such as;
+$$
+n_1(p) \propto \exp\left(-\frac{(p-\mu_{1})^2}
+  {2\sigma_{1}^2}\right),
+$$
+and 
+$$
+n_2(p) \propto \exp\left(-\frac{(p-\mu_{2})^2}
+  {2\sigma_{2}^2}\right).
+$$
+Then the biomass density would be given by a two normal distributions but with the means shifted by $\sigma^2$, which would give the following; 
+$$b_1(p) \propto \exp\left(-\frac{(p-(\mu_{1}-\sigma_{1}^2)^2}
+  {2\sigma_{1}^2}\right)$$
+  
+$$b_2(p) \propto \exp\left(-\frac{(p-(\mu_{2}-\sigma_{2}^2)^2}
+  {2\sigma_{2}^2}\right)$$
+  
+Firstly, find the numbers and biomass PPMR for each observation using the definition of each;
+$$
+r^{num}_i = \frac{1}{n}\sum_{j=1}^n \frac{M_i}{m_j}
+$$
+$$
+r^{bio}_{i} = \frac{M_i}{\frac{1}{n}\sum_{j = 1}^{n}m_{j}}
+$$
+
+
+Applying Gaussian Mixture Models in different ways 
+First way by calculating each individual PPMR by numbers and biomass and then applying the EM algorithm to find the estimated parameters and then plotting 
+```{r}
+ppmr <- stomach %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) 
+library(mixtools)
+my_mix1 <- normalmixEM(ppmr$numbers, k = 2) #applied the EM algorithm finding the estimates of the parameters 
+my_mix2 <- normalmixEM(ppmr$biomass, k = 2)
+ 
+#plot of numbers 
+ggplot(ppmr, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Clupea harengus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr, aes(x = biomass), main ="Clupea harengus") +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Clupea harengus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Looking at Gaussian distribution for different species 
+```{r}
+stomach_all <- stom_df %>%
+  select(Species = pred_species,
+            wprey = prey_weight_g,
+            wpredator = pred_weight_g) %>%
+  group_by(Species) %>%
+  filter(n() > 1000, wprey > 0) %>%
+  mutate(Nprey = 1,
+         l = log(wpredator / wprey),
+         weight_numbers = Nprey / sum(Nprey),
+         weight_biomass = Nprey * wprey / sum(Nprey * wprey))
+unique(stomach_all$Species)        
+
+no_bins <- 30  # Number of bins
+binsize <- (max(stomach_all$l) - min(stomach_all$l)) / (no_bins - 1)
+breaks <- seq(min(stomach_all$l) - binsize/2,
+              by = binsize, length.out = no_bins + 1)
+
+binned_stomach <- stomach_all %>% 
+  # bin data
+  mutate(cut = cut(l, breaks = breaks, right = FALSE,
+                   labels = FALSE)) %>% 
+  group_by(Species, cut) %>% 
+  summarise(Numbers = sum(Nprey), 
+            Biomass = sum(Nprey * wprey)) %>% 
+  # normalise
+  mutate(Numbers = Numbers / sum(Numbers) / binsize,
+         Biomass = Biomass / sum(Biomass) / binsize)  %>%
+  # column for predator/prey size ratio
+  mutate(l = map_dbl(cut, function(idx) breaks[idx] + binsize/2)) %>% 
+  gather(key = "Type", value = "Density", Numbers, Biomass)   
+```
+Plotting the graphs 
+```{r}
+grid <- seq(0, max(stomach_all$l), length = 100)
+normaldens <- plyr::ddply(stomach_all, "Species", function(df) {
+  data.frame( 
+    l = grid,
+    density = dnorm(grid, mean(df$l), sd(df$l))
+  )
+})
+
+ggplot(stomach_all) +
+  geom_density(aes(l, weight = weight_numbers), fill = "#00BFC4") +
+  facet_wrap(~Species, scales = "free_y", ncol = 4) +
+  xlab("Log of predator/prey mass ratio")  +
+  geom_line(aes(l, density), data = normaldens,
+            colour = "blue")
+
+grid <- seq(0, max(stomach_all$l), length = 100)
+shifted_normaldens <- plyr::ddply(stomach_all, "Species", function(df) {
+  data.frame( 
+    l = grid,
+    density = dnorm(grid, mean(df$l) - sd(df$l)^2, sd(df$l))
+  )
+})
+
+ggplot(stomach_all) +
+  geom_density(aes(l, weight = weight_biomass), fill = "#F8766D") +
+  facet_wrap(~Species, scales = "free_y", ncol = 4) +
+  xlab("Log of predator/prey mass ratio") +
+  ylab("Biomass density") +
+  geom_line(aes(l, density), data = shifted_normaldens,
+            colour = "red") 
+```
+
+    
+Scomber scombrus
+```{r, echo = FALSE}
+ppmr2 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Scomber scombrus")
+
+
+my_mix1 <- normalmixEM(ppmr2$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr2$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr2, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Scomber scombrus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr2$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr2, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Scomber scombrus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr2$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+ 
+Limanda limanda 
+```{r, echo = FALSE}
+ppmr3 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Limanda limanda" )
+
+my_mix1 <- normalmixEM(ppmr3$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr3$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr3, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Limanda limanda") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr3$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr3, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Limanda limanda") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr3$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+ 
+Pleuronectes platessa
+```{r, echo = FALSE}
+ppmr4 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Pleuronectes platessa")
+
+
+my_mix1 <- normalmixEM(ppmr4$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr4$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr4, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Pleuronectes platessa") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr4$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr4, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Pleuronectes platessa") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr4$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Gadus morhua
+```{r, echo = FALSE}
+ppmr5 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Gadus morhua" )
+
+my_mix1 <- normalmixEM(ppmr5$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr5$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr5, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Gadus morhua") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr5$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr5, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Gadus morhua") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr5$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+
+```
+
+Merluccius merluccius
+```{r, echo = FALSE}
+ppmr6 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Merluccius merluccius")
+
+my_mix1 <- normalmixEM(ppmr6$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr6$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr6, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Merluccius merluccius") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr6$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr6, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Merluccius merluccius") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr6$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Merlangius merlangus
+```{r, echo = FALSE}
+ppmr7 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Merlangius merlangus")
+
+my_mix1 <- normalmixEM(ppmr7$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr7$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr7, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Merlangius merlangus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr7$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr7, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Merlangius merlangus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr7$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Melanogrammus aeglefinus
+```{r, echo = FALSE}
+ppmr8 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Melanogrammus aeglefinus")
+
+my_mix1 <- normalmixEM(ppmr8$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr8$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr8, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Melanogrammus aeglefinus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr8$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr8, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Melanogrammus aeglefinus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr8$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Eutrigla gurnardus
+```{r, echo = FALSE}
+ppmr9 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Eutrigla gurnardus" )
+
+my_mix1 <- normalmixEM(ppmr9$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr9$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr9, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Eutrigla gurnardus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr9$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr9, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Eutrigla gurnardus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr9$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Trachurus trachurus
+```{r, echo = FALSE}
+ppmr10 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Trachurus trachurus")
+
+my_mix1 <- normalmixEM(ppmr10$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr10$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr10, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Trachurus trachurus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr10$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr10, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Trachurus trachurus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr10$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Raja clavata
+```{r, echo = FALSE}
+ppmr11 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Raja clavata" )
+
+my_mix1 <- normalmixEM(ppmr11$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr11$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr11, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Raja clavata") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr11$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr11, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Raja clavata") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr11$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+
+```
+
+Scophthalmus maximus
+```{r, echo = FALSE}
+ppmr12 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Scophthalmus maximus")
+
+my_mix1 <- normalmixEM(ppmr12$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr12$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr12, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Scophthalmus maximus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr12$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr12, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Scophthalmus maximus") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr12$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Amblyraja radiata
+```{r, echo = FALSE}
+ppmr13 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Amblyraja radiata" )
+
+my_mix1 <- normalmixEM(ppmr13$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr13$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr13, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Amblyraja radiata") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr13$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr13, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Amblyraja radiata") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr13$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Pollachius virens
+```{r, echo = FALSE}
+ppmr14 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Pollachius virens")
+
+my_mix1 <- normalmixEM(ppmr14$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr14$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr14, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Pollachius virens") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr14$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr14, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Pollachius virens") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr14$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
+Lepidorhombus whiffiagonis
+```{r, echo = FALSE}
+ppmr15 <- stomach_all %>%
+  mutate(numbers = log(wpredator/(wprey * sum(Nprey))),
+         biomass = log(wpredator*sum(Nprey)/wprey)) %>%
+  filter(Species == "Lepidorhombus whiffiagonis")
+
+my_mix1 <- normalmixEM(ppmr15$numbers, k = 2)
+my_mix2 <- normalmixEM(ppmr15$biomass, k = 2)
+
+#plot of numbers 
+ggplot(ppmr15, aes(x = numbers)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Lepidorhombus whiffiagonis") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix1[["mu"]], #mean
+    sd = my_mix1[["sigma"]], #standard deviation
+    lambda = my_mix1[["lambda"]], #amplitude
+    n = length(ppmr15$numbers), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+#plot of biomass
+ggplot(ppmr15, aes(x = biomass)) +
+  geom_histogram(binwidth = binsize) +
+  ggtitle("Lepidorhombus whiffiagonis") +
+  mapply(
+    function(mean, sd, lambda, n, binwidth) {
+      stat_function(
+        fun = function(x) {
+          (dnorm(x, mean = mean, sd = sd)) * n * binwidth * lambda
+        }
+      )
+    },
+    mean = my_mix2[["mu"]], #mean
+    sd = my_mix2[["sigma"]], #standard deviation
+    lambda = my_mix2[["lambda"]], #amplitude
+    n = length(ppmr15$biomass), #sample size
+    binwidth = binsize #binwidth used for histogram
+  )
+```
+
